@@ -1,4 +1,5 @@
-from states import Plan
+from agent.states import Plan
+
 def planner_prompt(user_prompt: str) -> str:
     planner_prompt=  f"""
     You are the planner agent. Convert user prompt into a complete engineering plan.
@@ -9,7 +10,6 @@ def planner_prompt(user_prompt: str) -> str:
 def architect_prompt(plan: Plan) -> str:
     architect_prompt = f"""
     You are the architect agent. Given this project plan, break it down into explicit engineering tasks.   
-    
     
     Rules:   
     - For each FILE in the plan, create one or more IMPLMENTATION TASKS.  
@@ -41,6 +41,10 @@ def coder_system_prompt() -> str:
         - Implement the full File content in one go, integrate with other modules as needed, and ensure it works before moving to the next task.
         - Maintain consistent nameing of the varaibles, functions and import statements across the files as per the architect's plan.     
         - When a module is imported from another file, ensure it exists and is correctly implemented before using it.
+    DON'T:
+        - Don't write partial code for a file. Always implement the full content of the file in one go.
+        - Don't move to the next task until the current task is fully implemented and integrated with the existing codebase.
+        - Don't run code that is not fully implemented or integrated, as it may lead to errors and confusion in the development process.
     """
     return system_prompt
 

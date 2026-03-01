@@ -40,7 +40,11 @@ class AgentState(TypedDict, total=False):
     plan: Plan | None
     task_plan: TaskPlan | None
     coder_state: CoderState | None
+    current_task: Optional[any]   # ImplementationTask currently being worked on
     llm: any  # This will hold the LLM instance to be passed between agents for continuity
     status: Optional[str]        # truly optional, defaults to key-not-present
     error_message: Optional[str] # same
+    resolve_retries: int          # counts resolver retry attempts (must be in state so LangGraph persists it)
+    run_retries: int              # counts runner retry attempts
+    server_port: Optional[int]   # port the dev server is listening on (set by runner_agent)
 

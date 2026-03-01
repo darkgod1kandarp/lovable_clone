@@ -1,19 +1,30 @@
-import pathlib
-import subprocess
-from typing import Tuple
+"""
+tools.py — LangChain tools backed by the E2B sandbox.
 
+All file I/O and command execution now happens inside the secure E2B cloud
+sandbox instead of on the host machine.  The public API (tool names, signatures)
+is unchanged so graph.py needs no edits.
+"""
+
+from typing import Tuple, Optional
 
 from langchain_core.tools import tool
 from langchain_core.runnables.config import RunnableConfig
 
+from agent.sandbox import get_sandbox, SandboxManager
 
-BASE_DIR = pathlib.Path.cwd() / "agent_workspace"
+# ── Helpers ────────────────────────────────────────────────────────────────────
 
-import subprocess
-import time
-from pathlib import Path
+def _get_project_id(config: RunnableConfig) -> str:
+    return config.get("configurable", {}).get("project_id", "default_project")
 
-# Commands that run forever and must be backgrounded
+
+def _sb(config: RunnableConfig) -> SandboxManager:
+    """Look up (or lazily create) the sandbox for the current project."""
+    return get_sandbox(_get_project_id(config))
+
+
+# Commands that run forever — must be backgrounded so the agent doesn't hang
 _BACKGROUND_COMMANDS = (
     "npm run dev",
     "npm start",
@@ -31,11 +42,13 @@ _BACKGROUND_COMMANDS = (
     "nodemon",
 )
 
+
 def _is_background_command(cmd: str) -> bool:
-    cmd_lower = cmd.strip().lower()
-    return any(cmd_lower.startswith(c) for c in _BACKGROUND_COMMANDS)
+    return any(cmd.strip().lower().startswith(c) for c in _BACKGROUND_COMMANDS)
+
 
 def _smart_timeout(cmd: str, user_timeout: int) -> int:
+    """Give slow commands (npm install, builds) an automatically extended timeout."""
     _SLOW = {
         "npm install": 300, "npm ci": 300,
         "yarn install": 300, "yarn": 300,
@@ -51,6 +64,8 @@ def _smart_timeout(cmd: str, user_timeout: int) -> int:
     return max(user_timeout, 60)
 
 
+# ── Tools ──────────────────────────────────────────────────────────────────────
+
 @tool
 def run_cmd(
     cmd: str,
@@ -59,128 +74,66 @@ def run_cmd(
     config: RunnableConfig = None,
 ) -> Tuple[int, str, str]:
     """
-    Run a shell command. Dev server commands (npm run dev, npm start, etc.)
-    are automatically run in the background and their PID is returned.
-    Install commands automatically get extended timeouts.
+    Run a shell command inside the secure E2B sandbox.
+
+    Dev-server commands (npm run dev, npm start, vite, etc.) are automatically
+    run in the background so the agent is not blocked.
+    Install commands get extended timeouts automatically.
 
     Returns: (return_code, stdout, stderr)
     """
-    cwd_dir = safe_path_for_project(cwd, config) if cwd else get_project_root(config)
+    sb = _sb(config)
 
-    # ── Auto-background dev servers ───────────────────────────────────────
     if _is_background_command(cmd):
-        print(f"[run_cmd] 🔄 Backgrounding dev server: {cmd}")
-        try:
-            # Start process detached, don't wait for it
-            proc = subprocess.Popen(
-                cmd,
-                shell=True,
-                cwd=str(cwd_dir),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            # Wait 3 seconds to capture any immediate startup errors
-            time.sleep(3)
-            poll = proc.poll()
+        print(f"[run_cmd] Backgrounding in sandbox: {cmd}")
+        return sb.run_background_cmd(cmd, cwd=cwd)
 
-            if poll is not None:
-                # Process already exited — something went wrong
-                out, err = proc.communicate(timeout=5)
-                return poll, out, f"Process exited early.\n{err}"
-            else:
-                # Still running — success, return the PID
-                return 0, f"Dev server started in background. PID={proc.pid}", ""
-        except Exception as e:
-            return -1, "", f"{type(e).__name__}: {e}"
-
-    # ── Normal command with smart timeout ─────────────────────────────────
     effective_timeout = _smart_timeout(cmd, timeout)
-    try:
-        res = subprocess.run(
-            cmd,
-            shell=True,
-            cwd=str(cwd_dir),
-            capture_output=True,
-            text=True,
-            timeout=effective_timeout,
-        )
-        return res.returncode, res.stdout, res.stderr
-
-    except subprocess.TimeoutExpired:
-        msg = (
-            f"Command timed out after {effective_timeout}s: {cmd}\n"
-            "The process may still be running. Use get_PID_of_process_running_on_port or kill_process."
-        )
-        return -1, "", msg
-
-    except Exception as e:
-        return -1, "", f"{type(e).__name__}: {e}"
-
-def get_project_root(config: RunnableConfig) -> pathlib.Path:
-    # Extract project_id from LangGraph config
-    project_id = config.get("configurable", {}).get("project_id", "default_project")
-    project_root = BASE_DIR / project_id
-    project_root.mkdir(parents=True, exist_ok=True)
-    return project_root
-
-def safe_path_for_project(path: str, config: RunnableConfig) -> pathlib.Path:
-    project_root = get_project_root(config)
-    p = (project_root / path).resolve()
-    if project_root.resolve() not in p.parents and project_root.resolve() != p.parent and project_root.resolve() != p:
-        raise ValueError("Attempt to write outside project root")
-    return p
+    print(f"[run_cmd] Running in sandbox: {cmd}")
+    return sb.run_cmd(cmd, cwd=cwd, timeout=effective_timeout)
 
 
 @tool
 def write_file(path: str, content: str, config: RunnableConfig) -> str:
-    """Writes content to a file at the specified path within the project root."""
-    p = safe_path_for_project(path, config)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    with open(p, "w", encoding="utf-8") as f:
-        f.write(content)
-    return f"WROTE:{p}"
+    """Write content to a file inside the E2B sandbox project directory."""
+    return _sb(config).write_file(path, content)
 
 
 @tool
 def read_file(path: str, config: RunnableConfig) -> str:
-    """Reads content from a file at the specified path within the project root."""
-    p = safe_path_for_project(path, config)
-    if not p.exists():
-        return ""
-    with open(p, "r", encoding="utf-8") as f:
-        return f.read()
+    """Read content from a file inside the E2B sandbox project directory."""
+    return _sb(config).read_file(path)
 
 
 @tool
 def get_current_directory(config: RunnableConfig) -> str:
-    """Returns the current working directory."""
-    return str(get_project_root(config))
+    """Return the current working directory path inside the sandbox."""
+    sb = _sb(config)
+    return sb.work_dir
+
 
 @tool
 def list_files(directory: str = ".", config: RunnableConfig = None) -> str:
-    """Lists all files in the specified directory within the project root."""
-    p = safe_path_for_project(directory, config)
-    if not p.is_dir():
-        return f"ERROR: {p} is not a directory"
-    files = [str(f.relative_to(get_project_root(config))) for f in p.glob("**/*") if f.is_file()]
-    return "\n".join(files) if files else "No files found."
+    """
+    List all files in the specified directory inside the E2B sandbox.
+    node_modules, .git, __pycache__, dist, and build are excluded.
+    """
+    return _sb(config).list_files(directory)
 
 
 @tool
-def kill_process(procees_id: int) -> str: 
-    """Kills a process by its ID."""
-    try: 
-        subprocess.run(f"kill {procees_id}", shell=True, check=True)
-        return f"Process {procees_id} killed successfully."
-    except subprocess.CalledProcessError as e: 
-        return f"Failed to kill process {procees_id}: {e}"
+def kill_process(procees_id: int, config: RunnableConfig = None) -> str:
+    """Kill a process (by PID) running inside the E2B sandbox."""
+    return _sb(config).kill_process(procees_id)
+
 
 @tool
-def get_PID_of_process_running_on_port(port: int) -> str: 
-    """Gets the process ID of the process running on the specified port."""
-    try: 
-        res = subprocess.run(f"lsof -i :{port} -t", shell=True, capture_output=True, text=True, check=True)
-        return res.stdout.strip()
-    except subprocess.CalledProcessError as e: 
-        return f"Failed to get process ID for port {port}: {e}"
+def get_PID_of_process_running_on_port(
+    port: int,
+    config: RunnableConfig = None,
+) -> str:
+    """
+    Check whether a process is listening on *port* inside the E2B sandbox.
+    Returns a non-empty string (truthy) if a process is found, empty string if not.
+    """
+    return _sb(config).get_pid_on_port(port)
