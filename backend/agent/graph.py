@@ -1,6 +1,7 @@
 import datetime
 import json
 import os
+import threading
 import uuid
 
 from langchain_groq                  import ChatGroq
@@ -22,12 +23,25 @@ import json
 
 load_dotenv()
 
-MAX_RESOLVE_RETRIES   = 3     # Max times resolver retries the same error
-MAX_RUN_RETRIES       = 3     # Max times runner+resolver loop retries
+MAX_RESOLVE_RETRIES   = 8     # Max times resolver retries the same error
+MAX_RUN_RETRIES       = 10    # Max times runner+resolver loop retries
 MAX_TOOL_OUTPUT_CHARS = 2000  # Truncate tool outputs beyond this length
-MAX_RECURSION_LIMIT   = 30    # Max tool-call rounds per react_agent invocation
+MAX_RECURSION_LIMIT   = 100    # Max tool-call rounds per react_agent invocation
 MAX_TOKENS_IN_HISTORY = 4000  # Max tokens kept in message history per agent
 API_CALL_LOG_PATH     = os.path.join(os.path.dirname(__file__), "api_call_log.txt")
+
+# Thread-local storage so each background job thread carries its own phase callback.
+# This lets every node report its phase at START (not just after it finishes).
+_phase_local = threading.local()
+
+def _notify_phase(node_name: str, info: dict = None):
+    """Call the on_phase callback stored in thread-local if one is registered."""
+    cb = getattr(_phase_local, "callback", None)
+    if cb:
+        try:
+            cb(node_name, info or {})
+        except Exception:
+            pass
 
 
 def log_api_call(api_name: str):
@@ -79,6 +93,42 @@ def _make_react_agent(llm, tools):
     so tool failures are reported to the LLM instead of crashing the agent.
     """
     return create_react_agent(llm, tools)
+
+
+def _log_tool_calls(result: dict, agent_label: str = "agent"):
+    """
+    Print every tool call + truncated result from a react_agent result dict.
+    Works by scanning messages for AIMessage.tool_calls and ToolMessage responses.
+    """
+    messages = result.get("messages", [])
+    calls = []
+    responses = {}
+
+    for msg in messages:
+        # AIMessage carries a list of tool_calls: [{id, name, args}, ...]
+        tool_calls = getattr(msg, "tool_calls", None)
+        if tool_calls:
+            for tc in tool_calls:
+                calls.append(tc)
+
+        # ToolMessage carries the output of a single tool call
+        if getattr(msg, "type", None) == "tool" or msg.__class__.__name__ == "ToolMessage":
+            tid  = getattr(msg, "tool_call_id", "?")
+            out  = str(getattr(msg, "content", ""))[:200]
+            responses[tid] = out
+
+    if not calls:
+        print(f"  [{agent_label}] No tool calls recorded.")
+        return
+
+    print(f"  [{agent_label}] Tool calls ({len(calls)}):")
+    for tc in calls:
+        tid  = tc.get("id", "?")
+        name = tc.get("name", "?")
+        args = str(tc.get("args", {}))[:120]
+        out  = responses.get(tid, "(no response)")
+        print(f"    ► {name}({args})")
+        print(f"      ↳ {out}")
 
 
 def _invoke_react_agent(agent, messages: list) -> dict:
@@ -243,13 +293,47 @@ def coder_agent(state: AgentState) -> AgentState:
         "Use the provided tools to write files and run commands as needed."
     )
 
-    agent  = _make_react_agent(llm, _get_tools(state.get("project_id", "default_project")))
-    result = _invoke_react_agent(agent, [
+    agent      = _make_react_agent(llm, _get_tools(state.get("project_id", "default_project")))
+    raw_result = _invoke_react_agent(agent, [
         {"role": "system", "content": system_prompt},
         {"role": "user",   "content": user_prompt},
     ])
+    _log_tool_calls(raw_result, f"coder/step-{coder_state.current_step_idx}")
 
-    result = _extract_json_from_agent_result(result)
+    result = _extract_json_from_agent_result(raw_result)
+
+    MAX_CODER_STEP_RETRIES = 2
+    coder_step_retries = state.get("coder_step_retries", 0)
+
+    if (not result.get("resolved") and
+            "LLM did not return JSON" in result.get("error_message", "")):
+        had_tool_calls = any(
+            getattr(m, "tool_calls", None)
+            for m in raw_result.get("messages", [])
+        )
+        if had_tool_calls:
+            # LLM ran tools but forgot the JSON wrapper — work was done, assume success.
+            print(f"[Coder] Step {coder_state.current_step_idx}: LLM made tool calls "
+                  "but omitted JSON — assuming step succeeded.")
+            result = {"resolved": True, "error_message": None}
+        elif coder_step_retries < MAX_CODER_STEP_RETRIES:
+            # LLM returned nothing at all — retry the same step without advancing.
+            print(f"[Coder] Step {coder_state.current_step_idx}: LLM returned nothing "
+                  f"(retry {coder_step_retries + 1}/{MAX_CODER_STEP_RETRIES}).")
+            return {
+                "coder_state"      : coder_state,   # keep same step index
+                "llm"              : llm,
+                "error_message"    : "CODER_STEP_RETRY",
+                "current_task"     : current_task,
+                "status"           : None,
+                "coder_step_retries": coder_step_retries + 1,
+            }
+        else:
+            # Exhausted per-step retries — give up on this step and move on.
+            print(f"[Coder] Step {coder_state.current_step_idx}: LLM returned nothing "
+                  "after max retries — skipping step (runner will catch failures).")
+            result = {"resolved": True, "error_message": None}
+
     print(result)
     new_coder_state = CoderState(
         task=coder_state.task,
@@ -260,21 +344,23 @@ def coder_agent(state: AgentState) -> AgentState:
     if result.get("resolved") == True:
         print(f"[Coder] Step {coder_state.current_step_idx} completed successfully.")
         return {
-            "coder_state"  : new_coder_state,
-            "llm"          : llm,
-            "error_message": None,
-            "current_task" : current_task,
-            "status"       : None,
+            "coder_state"      : new_coder_state,
+            "llm"              : llm,
+            "error_message"    : None,
+            "current_task"     : current_task,
+            "status"           : None,
+            "coder_step_retries": 0,   # reset per-step retry counter on success
         }
     else:
         error = result.get("error_message", "Unknown error during coding step.")
         print(f"[Coder] Step {coder_state.current_step_idx} {error}")
         return {
-            "coder_state"  : new_coder_state,
-            "llm"          : llm,
-            "error_message": error,
-            "current_task" : current_task,
-            "status"       : None,
+            "coder_state"      : new_coder_state,
+            "llm"              : llm,
+            "error_message"    : error,
+            "current_task"     : current_task,
+            "status"           : None,
+            "coder_step_retries": 0,
         }
 
 
@@ -291,20 +377,83 @@ def runner_agent(state: AgentState) -> AgentState:
 
     system_prompt = """You are a QA engineer verifying a web application works.
 
+The project uses Next.js for the frontend (always) and optionally Node.js/Express for the backend.
+
 Steps to follow IN ORDER:
-1. List files to understand the project structure.
-2. Read package.json (or requirements.txt) to find the start command.
-3. Install dependencies:
-   - Node.js: run `npm install`
-   - Python:  run `pip install -r requirements.txt`
-4. Start the dev server using run_cmd — it runs in the background automatically.
-5. Wait a few seconds, then use get_PID_of_process_running_on_port to confirm the server is up.
-6. If a process is found on the port → success=true. Leave the server running.
+1. List files in the work directory to understand the project layout.
+2. Find and read every package.json (root, frontend/, backend/) to identify start commands.
+3. Install dependencies for each package.json found:
+   - Run `npm install` in every directory that has a package.json.
+4. Start the servers:
+   - Next.js frontend: run `npm run dev` in the directory containing the Next.js package.json.
+     Confirm the dev script is `next dev -H 0.0.0.0 -p 3000` before running it.
+   - Node.js backend (if it exists): run `npm run dev` or `node server.js` in the backend directory.
+5. Run `sleep 30` to wait for servers to fully start AND for Next.js to compile all pages.
+6. Check ports in this exact priority order:
+   - 3000  → Next.js frontend (always check this first)
+   - 5000  → Node.js/Express backend
+   - 8000  → alternative backend port
+   - 8080  → alternative backend port
+7. Call get_PID_of_process_running_on_port for each port until you find one with a process.
+8. The port where the FRONTEND (Next.js) is running is the one to return.
+   - If Next.js is on port 3000 → proceed to step 9.
+   - Backend running on 5000 does NOT count as the frontend — keep looking.
+9. Sanity curl:
+   run_cmd("curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/")
+   - 200 → great, return success=true, port=3000.
+   - 404 → Next.js is running but returning 404. This is almost ALWAYS caused by a
+     COMPILATION ERROR in one of the source files (NOT necessarily pages/index.js).
+     Follow the 404 diagnosis procedure below BEFORE giving up.
+
+404 DIAGNOSIS PROCEDURE (run these checks in order):
+  A. Check pages/_app.js for CSS imports:
+       read_file("pages/_app.js")
+       If it contains ANY line like `import '../styles/globals.css'` or
+       `import './anything.css'` or any .css/.scss import, DELETE that import line.
+       The ONLY correct content for pages/_app.js is:
+         export default function App({ Component, pageProps }) {
+           return <Component {...pageProps} />;
+         }
+       Rewrite the file to exactly that content, nothing else.
+
+  B. Check pages/index.js exists and has a default export:
+       read_file("pages/index.js")
+       If it is missing or has no `export default function`, write:
+         export default function Home() { return <div>Loading…</div>; }
+
+  C. Check pages/_document.js for syntax errors:
+       read_file("pages/_document.js")
+       It must import from 'next/document' (NOT 'next/head').
+       Fix any obvious syntax errors.
+
+  D. After fixing any of the above, wait 10 s for Next.js hot-reload:
+       run_cmd("sleep 10")
+     Then curl again:
+       run_cmd("curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/")
+     - 200 → fixed! Return success=true, port=3000.
+     - Still 404 → continue to step E (do NOT give up here).
+
+  E. Read pages/index.js and find EVERY import statement at the top.
+     First, check for WRONG PATHS — any import referencing `app/` or `page.js` is wrong
+     in a Pages Router project. Fix it to point to components/ instead:
+       BAD:  import Calculator from '../app/page.js'
+       GOOD: import Calculator from '../components/Calculator'
+     Then for each imported component, resolve it:
+       - read_file("components/Calculator.js")  (or .jsx / .tsx — try variants)
+       - If the file is missing → write a minimal stub so the import resolves:
+             export default function Calculator() { return <div>Loading…</div>; }
+       - If the file exists, scan it for: syntax errors, `export default X` where X is
+         undefined, any CSS file imports, or any package that isn't in package.json.
+       - Fix every problem found, then wait 10 s and curl again.
+     Repeat for every imported component until the curl returns 200 or all components
+     have been checked and fixed. Only report success=false AFTER all components are clean.
 
 CRITICAL:
-- Do NOT kill the server process. It must stay running so users can access the preview URL.
-- npm run dev / vite / npm start run in the background — do not wait for them to exit.
-- If the port check confirms a running process, report success=true immediately.
+- Do NOT kill any running process. Servers must stay alive for the preview URL to work.
+- `npm run dev` runs in the background automatically — never wait for it to exit.
+- If NO process is found after checking all ports, report success=false with a clear error.
+- The most common cause of 404 with a valid pages/index.js is a CSS import in _app.js.
+  ALWAYS check _app.js first when diagnosing a 404.
 
 Return ONLY valid JSON:
 {"success": boolean, "error_message": string or null, "run_command": string, "port": int}
@@ -321,9 +470,8 @@ No text outside the JSON."""
         {"role": "system", "content": system_prompt},
         {"role": "user",   "content": "Install dependencies, start the dev server, and confirm it is running. Leave the server running."},
     ])
+    _log_tool_calls(result, "runner")
 
-    
-    print(result, "RESULT")
     parsed = _extract_json_from_agent_result(result)
     print(f"[Runner] Result: {parsed}")
 
@@ -404,9 +552,22 @@ def resolver_agent(state: AgentState) -> AgentState:
         {"role": "system", "content": system_prompt},
         {"role": "user",   "content": user_prompt},
     ])
+    _log_tool_calls(result, f"resolver/attempt-{resolve_retries+1}")
 
     parsed = _extract_json_from_agent_result(result)
     print(f"[Resolver] Output: {parsed}")
+
+    # If the resolver's OWN LLM also failed to return JSON, retrying is pointless —
+    # give up immediately rather than burning all 8 retry slots.
+    # Use `or ""` because error_message may explicitly be None (key present, value None).
+    if "LLM did not return JSON" in (parsed.get("error_message") or ""):
+        print("[Resolver] Resolver LLM also failed to return JSON — giving up immediately.")
+        return {
+            "llm"            : llm,
+            "status"         : "RESOLVE_FAILED",
+            "error_message"  : error_message,   # restore original error, not the meta-error
+            "resolve_retries": MAX_RESOLVE_RETRIES,
+        }
 
     if parsed.get("resolved"):
         print("[Resolver] Error resolved.")
@@ -450,6 +611,8 @@ def _coder_router(state: AgentState) -> str:
     error  = state.get("error_message")
     if status == "CODING_DONE":
         print("[Router:coder] → runner");  return "run"
+    if error == "CODER_STEP_RETRY":
+        print("[Router:coder] → coder (retry same step — LLM returned nothing)"); return "next"
     if error:
         print(f"[Router:coder] → resolver ({error[:80]})"); return "error"
     print("[Router:coder] → coder (next step)");            return "next"
@@ -509,6 +672,8 @@ def run_agent(
     use_ollama  : bool = False,
     use_gemini  : bool = False,
     use_qwen    : bool = False,
+    use_groq    : bool = False,
+    on_phase    = None,   # optional callback(node_name: str) called after each graph node
 ) -> dict:
 
     if use_ollama:
@@ -516,41 +681,67 @@ def run_agent(
                          base_url="http://127.0.0.1:11434")
         print("Using Ollama (qwen2.5-coder:7b)")
     elif use_gemini:
-        llm = ChatGemini(model="gemini-2.5-flash", temperature=0.2)
+        llm = ChatGemini(model="gemini-2.5-pro", temperature=0.2)
         print("Using Gemini (gemini-2.5-flash)")
     elif use_qwen:
-        llm = ChatQwen(model="qwen3-max", temperature=0.2)
+        llm = ChatQwen(model="qwen3-235b-a22b", temperature=0.2)
         print("Using Qwen (qwen3-max)")
-    else:
+    elif use_groq:
         llm = ChatGroq(model="openai/gpt-oss-120b", temperature=0.2)
         print("Using Groq (gpt-oss-120b)")
 
+    print(llm)
 
-    crawl_results, has_crawl_results = crawl_website_for_clone(user_prompt) 
+    crawl_results, has_crawl_results = crawl_website_for_clone(user_prompt)
     if has_crawl_results:
         content = f"Crawl results:\n{crawl_results}\n\n"
     else:
         content = user_prompt
-        
+
     initial_state = AgentState(
-        messages        = [HumanMessage(content=content)],
-        project_id      = project_id,
-        llm             = llm,
-        run_retries     = 0,
-        resolve_retries = 0,
-        error_message   = None,
-        status          = None,
+        messages           = [HumanMessage(content=content)],
+        project_id         = project_id,
+        llm                = llm,
+        run_retries        = 0,
+        resolve_retries    = 0,
+        coder_step_retries = 0,
+        error_message      = None,
+        status             = None,
     )
+
+    config = {"configurable": {"thread_id": project_id, "project_id": project_id}}
 
     print(f"\n{'='*60}")
     print(f"Starting agent | Project: {project_id}")
     print(f"Prompt: {user_prompt}")
     print(f"{'='*60}\n")
 
-    result = agent.invoke(
-        initial_state,
-        config={"configurable": {"thread_id": project_id, "project_id": project_id}},
-    )
+    # stream() yields {node_name: partial_state} after each node finishes.
+    # This lets us report live progress via on_phase without blocking.
+    for chunk in agent.stream(initial_state, config=config):
+        node_name   = next(iter(chunk))
+        node_output = chunk[node_name]
+        print(f"[Graph] Node finished: {node_name}")
+
+        if on_phase:
+            try:
+                # Build a rich info dict so the frontend can show granular progress
+                info = {}
+                if node_name == "coder":
+                    coder_state  = node_output.get("coder_state")
+                    current_task = node_output.get("current_task")
+                    if coder_state:
+                        info["step"]        = coder_state.current_step_idx  # steps done so far
+                        info["total_steps"] = len(coder_state.task.implementation_steps)
+                    if current_task:
+                        info["step_description"] = current_task.task_description[:100]
+                on_phase(node_name, info)
+            except Exception:
+                pass
+
+    # Retrieve the full accumulated state from the checkpointer
+    snapshot     = agent.get_state(config=config)
+    result       = dict(snapshot.values)
 
     final_status = result.get("status", "UNKNOWN")
     print(f"\n{'='*60}")
@@ -565,6 +756,7 @@ def is_clone_request(user_prompt: str) -> bool:
     indicators = ["clone", "copy", "replicate", "similar to", "like"]
     return any(indicator in user_prompt.lower() for indicator in indicators)
 
+
 def crawl_website_for_clone(user_prompt: str) -> list:
     if is_clone_request(user_prompt):
         crawl_results = asyncio.run(crawl_website(user_prompt))
@@ -576,7 +768,6 @@ def crawl_website_for_clone(user_prompt: str) -> list:
     
 if __name__ == "__main__":
     app_1_id = str(uuid.uuid4())   
-    
     prompt = "Can you make clone of https://aceengineeringworks.co.uk/"  
     
     run_agent(
@@ -584,3 +775,8 @@ if __name__ == "__main__":
         project_id=app_1_id,
         use_gemini=True,
     )
+    
+    
+    
+
+

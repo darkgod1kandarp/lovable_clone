@@ -8,8 +8,11 @@ get_sandbox(project_id) returns the cached instance, creating it on first call.
 from e2b_code_interpreter import Sandbox
 import os
 import threading
+from dotenv import load_dotenv
 
-os.environ["E2B_API_KEY"] = "e2b_711d9614c47701c4690fa0ab78137c2e44dff94f"
+
+load_dotenv()  # Load E2B_API_KEY from .env if present
+
 
 _sandboxes: dict[str, "SandboxManager"] = {}
 _lock = threading.Lock()

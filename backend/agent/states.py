@@ -46,5 +46,6 @@ class AgentState(TypedDict, total=False):
     error_message: Optional[str] # same
     resolve_retries: int          # counts resolver retry attempts (must be in state so LangGraph persists it)
     run_retries: int              # counts runner retry attempts
+    coder_step_retries: int       # counts retries for a single coder step that returned no JSON + no tools
     server_port: Optional[int]   # port the dev server is listening on (set by runner_agent)
 
