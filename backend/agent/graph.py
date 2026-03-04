@@ -4,6 +4,7 @@ import os
 import threading
 import uuid
 
+from langchain_anthropic             import ChatAnthropic
 from langchain_groq                  import ChatGroq
 from langchain_ollama                import ChatOllama
 from langchain_google_genai          import ChatGoogleGenerativeAI as ChatGemini
@@ -17,7 +18,7 @@ from dotenv                          import load_dotenv
 
 from agent.prompts import planner_prompt, architect_prompt, coder_system_prompt, resolver_prompt
 from agent.states  import Plan, TaskPlan, CoderState, AgentState
-from agent.sandbox import get_sandbox, cleanup_sandbox, get_preview_url
+from agent.sandbox import get_sandbox
 from agent.crawl_4ai import *
 import json   
 
@@ -26,22 +27,12 @@ load_dotenv()
 MAX_RESOLVE_RETRIES   = 8     # Max times resolver retries the same error
 MAX_RUN_RETRIES       = 10    # Max times runner+resolver loop retries
 MAX_TOOL_OUTPUT_CHARS = 2000  # Truncate tool outputs beyond this length
-MAX_RECURSION_LIMIT   = 100    # Max tool-call rounds per react_agent invocation
+MAX_RECURSION_LIMIT   = 400    # Max tool-call rounds per react_agent invocation
 MAX_TOKENS_IN_HISTORY = 4000  # Max tokens kept in message history per agent
 API_CALL_LOG_PATH     = os.path.join(os.path.dirname(__file__), "api_call_log.txt")
 
-# Thread-local storage so each background job thread carries its own phase callback.
-# This lets every node report its phase at START (not just after it finishes).
-_phase_local = threading.local()
 
-def _notify_phase(node_name: str, info: dict = None):
-    """Call the on_phase callback stored in thread-local if one is registered."""
-    cb = getattr(_phase_local, "callback", None)
-    if cb:
-        try:
-            cb(node_name, info or {})
-        except Exception:
-            pass
+_phase_local = threading.local()
 
 
 def log_api_call(api_name: str):
@@ -406,15 +397,16 @@ Steps to follow IN ORDER:
      Follow the 404 diagnosis procedure below BEFORE giving up.
 
 404 DIAGNOSIS PROCEDURE (run these checks in order):
-  A. Check pages/_app.js for CSS imports:
+  A. Check pages/_app.js and styles/globals.css:
        read_file("pages/_app.js")
-       If it contains ANY line like `import '../styles/globals.css'` or
-       `import './anything.css'` or any .css/.scss import, DELETE that import line.
-       The ONLY correct content for pages/_app.js is:
+       It MUST import styles/globals.css. The correct content is:
+         import '../styles/globals.css';
          export default function App({ Component, pageProps }) {
            return <Component {...pageProps} />;
          }
-       Rewrite the file to exactly that content, nothing else.
+       If styles/globals.css does not exist, CREATE it (do NOT remove the import):
+         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+         body { font-family: 'Segoe UI', system-ui, sans-serif; line-height: 1.6; }
 
   B. Check pages/index.js exists and has a default export:
        read_file("pages/index.js")
@@ -433,27 +425,30 @@ Steps to follow IN ORDER:
      - 200 → fixed! Return success=true, port=3000.
      - Still 404 → continue to step E (do NOT give up here).
 
-  E. Read pages/index.js and find EVERY import statement at the top.
-     First, check for WRONG PATHS — any import referencing `app/` or `page.js` is wrong
-     in a Pages Router project. Fix it to point to components/ instead:
-       BAD:  import Calculator from '../app/page.js'
-       GOOD: import Calculator from '../components/Calculator'
-     Then for each imported component, resolve it:
-       - read_file("components/Calculator.js")  (or .jsx / .tsx — try variants)
-       - If the file is missing → write a minimal stub so the import resolves:
-             export default function Calculator() { return <div>Loading…</div>; }
-       - If the file exists, scan it for: syntax errors, `export default X` where X is
-         undefined, any CSS file imports, or any package that isn't in package.json.
-       - Fix every problem found, then wait 10 s and curl again.
-     Repeat for every imported component until the curl returns 200 or all components
-     have been checked and fixed. Only report success=false AFTER all components are clean.
+  E. Scan pages/index.js for bad import paths FIRST (most common cause of 404):
+     run_cmd("grep -n 'src/app\\|app/page\\|src/components\\|src/' pages/index.js")
+     If ANY line is returned → those imports are WRONG. This project has NO src/ and NO app/ directory.
+     Fix procedure:
+       1. Read pages/index.js fully: run_cmd("cat pages/index.js")
+       2. For each bad import like `import Hero from '../src/app/page'`:
+            - The correct path is ALWAYS `../components/<ComponentName>`
+            - Check if components/<ComponentName>.js exists: run_cmd("cat components/Hero.js")
+            - If missing → create it with a real implementation (not just a stub)
+            - Rewrite the import: import Hero from '../components/Hero'
+       3. Rewrite pages/index.js completely with all imports corrected.
+       4. Wait 15 s, then curl again. If 200 → done.
+
+     After fixing bad paths, check each remaining import for missing component files:
+       - read_file("components/ComponentName.js")
+       - If missing → create it.
+       - If it exists, scan for syntax errors or undefined exports.
+     Repeat until curl returns 200 or all components are verified clean.
 
 CRITICAL:
 - Do NOT kill any running process. Servers must stay alive for the preview URL to work.
 - `npm run dev` runs in the background automatically — never wait for it to exit.
 - If NO process is found after checking all ports, report success=false with a clear error.
-- The most common cause of 404 with a valid pages/index.js is a CSS import in _app.js.
-  ALWAYS check _app.js first when diagnosing a 404.
+- The #1 cause of 404 is bad import paths (src/app/, app/) — ALWAYS grep for these first.
 
 Return ONLY valid JSON:
 {"success": boolean, "error_message": string or null, "run_command": string, "port": int}
@@ -673,6 +668,7 @@ def run_agent(
     use_gemini  : bool = False,
     use_qwen    : bool = False,
     use_groq    : bool = False,
+    use_claude    : bool = False,
     on_phase    = None,   # optional callback(node_name: str) called after each graph node
 ) -> dict:
 
@@ -682,13 +678,19 @@ def run_agent(
         print("Using Ollama (qwen2.5-coder:7b)")
     elif use_gemini:
         llm = ChatGemini(model="gemini-2.5-pro", temperature=0.2)
-        print("Using Gemini (gemini-2.5-flash)")
+        print("Using Gemini (gemini-2.5-pro)")
     elif use_qwen:
         llm = ChatQwen(model="qwen3-235b-a22b", temperature=0.2)
         print("Using Qwen (qwen3-max)")
     elif use_groq:
         llm = ChatGroq(model="openai/gpt-oss-120b", temperature=0.2)
         print("Using Groq (gpt-oss-120b)")
+    elif use_claude:
+        llm = ChatAnthropic(model="claude-haiku-4-5-20251001", 
+                                temperature=0.2, 
+                                api_key=os.getenv("CLAUDE_API_KEY"))
+        print("Using Claude (claude-haiku-4-5-20251001)")
+    
 
     print(llm)
 
@@ -751,6 +753,102 @@ def run_agent(
     print(f"{'='*60}\n")
 
     return result
+
+def run_edit_agent(
+    edit_prompt : str,
+    project_id  : str,
+    use_ollama  : bool = False,
+    use_gemini  : bool = False,
+    use_qwen    : bool = False,
+    use_groq    : bool = False,
+    on_phase    = None,
+) -> dict:
+    """
+    Run a targeted edit on an already-built project without replanning.
+    Reuses the existing E2B sandbox (dev server may already be running).
+    """
+    if use_ollama:
+        llm = ChatOllama(model="qwen2.5-coder:7b", temperature=0.2,
+                         base_url="http://127.0.0.1:11434")
+        print("Using Ollama (qwen2.5-coder:7b)")
+    elif use_gemini:
+        llm = ChatGemini(model="gemini-2.5-pro", temperature=0.2)
+        print("Using Gemini (gemini-2.5-pro)")
+    elif use_qwen:
+        llm = ChatQwen(model="qwen3-235b-a22b", temperature=0.2)
+        print("Using Qwen (qwen3-max)")
+    elif use_groq:
+        llm = ChatGroq(model="openai/gpt-oss-120b", temperature=0.2)
+        print("Using Groq (gpt-oss-120b)")
+    else:
+        llm = ChatAnthropic(model="gemini-2.5-pro", temperature=0.2)
+        print("Using default: Gemini (gemini-2.5-pro)")
+
+    if on_phase:
+        on_phase("editor", {})
+
+    system_prompt = """You are an expert editor for an existing Next.js web application already running in an E2B sandbox.
+
+The dev server may or may not be running on port 3000. Check first, restart only if needed.
+
+Steps to follow:
+1. Check server: run_cmd("curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/")
+   - If 200 → server is alive, skip to step 2.
+   - If NOT 200 → find the Next.js package.json via list_files(), then run:
+       run_cmd("npm run dev &")
+     Wait 15s: run_cmd("sleep 15")
+     Then curl again to confirm it started.
+2. list_files() to understand the current project structure.
+3. read_file() ONLY on files that are relevant to the edit request — do NOT read everything.
+4. Make targeted, minimal changes with write_file(). Do NOT rewrite unrelated files.
+5. Keep the existing Next.js Pages Router structure: pages/, components/, styles/.
+6. After writing changed files: run_cmd("sleep 10") to let Next.js hot-reload.
+7. Verify: run_cmd("curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/")
+   - 200 → return {"resolved": true, "error_message": null, "port": 3000}
+   - Not 200 → diagnose, fix, wait 10s, curl again. Retry up to 3 times.
+   - If still broken after 3 retries → return {"resolved": false, "error_message": "<what went wrong>", "port": 3000}
+
+IMPORTANT RULES:
+- NEVER kill the running dev server (do not use kill_process).
+- NEVER modify package.json unless a brand-new npm package is absolutely required for the edit.
+  If you do add a package, run `npm install` before using it.
+- NEVER import a plain .css file (e.g. globals.css) in any file except pages/_app.js.
+  For component-level styles, use CSS Modules: styles/Foo.module.css imported as
+  `import styles from '../styles/Foo.module.css'`.
+- NEVER read node_modules/, .git/, .next/, dist/, or build/ directories.
+- Make only the changes needed for the edit request — do not refactor or improve unrelated code.
+
+Return ONLY valid JSON (no text outside it):
+{"resolved": true/false, "error_message": null or "description of problem", "port": 3000}"""
+
+    user_prompt = (
+        f"Edit request: {edit_prompt}\n\n"
+        "Make this specific change to the existing project. "
+        "Do not rebuild the whole app — only modify what is needed."
+    )
+
+    tools = get_sandbox(project_id).get_tools(
+        include_process_tools=True, include_kill=False
+    )
+    agent  = _make_react_agent(llm, tools)
+    result = _invoke_react_agent(agent, [
+        {"role": "system", "content": system_prompt},
+        {"role": "user",   "content": user_prompt},
+    ])
+    log_api_call("edit_agent_llm")
+    _log_tool_calls(result, "editor")
+
+    if on_phase:
+        on_phase("done", {})
+
+    parsed = _extract_json_from_agent_result(result)
+    status = "ALL_DONE" if parsed.get("resolved") else "RESOLVE_FAILED"
+    return {
+        "status"       : status,
+        "error_message": parsed.get("error_message"),
+        "server_port"  : parsed.get("port", 3000),
+    }
+
 
 def is_clone_request(user_prompt: str) -> bool:
     indicators = ["clone", "copy", "replicate", "similar to", "like"]

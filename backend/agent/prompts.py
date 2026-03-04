@@ -36,9 +36,20 @@ MANDATORY TECH STACK:
   file uploads, WebSockets, or any operation that cannot run safely in the browser.
   Simple display-only or client-side-only apps do NOT need a separate backend.
 
+MANDATORY DESIGN DECISIONS — include ALL of these in your plan:
+- Color theme: choose a specific palette appropriate for the app domain:
+    * SaaS/Tech tools → indigo/violet (#6366f1, #a78bfa) on dark background
+    * Health/Nature/Wellness → emerald/teal (#10b981, #34d399) on light or dark
+    * Finance/Professional → blue (#3b82f6, #60a5fa) on dark
+    * Creative/Portfolio/Agency → rose/fuchsia (#f43f5e, #e879f9) on dark
+    * E-commerce/Marketplace → amber/orange (#f59e0b, #fb923c) on light
+    * Education/Productivity → cyan/sky (#06b6d4, #38bdf8) on dark
+- Design tone: one of [minimal-dark, bold-dark, clean-light, vibrant-light]
+- List every page and its main sections (e.g. Navbar, Hero, Features, Pricing, CTA, Footer)
+- Target audience and what the design should communicate
+
 Decide for yourself whether a backend is required based on the user request.
 Do NOT add a backend "just in case" — keep it minimal.
-
 User Request: {user_prompt}
 """
 
@@ -58,12 +69,14 @@ This task must create ALL of the following files with their full boilerplate con
     - package.json          (next, react, react-dom with dev script: "next dev -H 0.0.0.0 -p 3000")
     - next.config.js        (minimal CommonJS config)
     - pages/_document.js    (with the postMessage error-capture script via dangerouslySetInnerHTML)
-    - pages/_app.js         (EXACT content — no CSS import, no styles import, nothing else):
+    - pages/_app.js         (MUST import globals.css and render Component):
+                              import '../styles/globals.css';
                               export default function App({{ Component, pageProps }}) {{
                                 return <Component {{...pageProps}} />;
                               }}
     - pages/index.js        (MUST export a default React component — even if it just returns a <div>Loading…</div>.
                              A missing or broken pages/index.js causes Next.js to show its built-in 404 page.)
+    - styles/globals.css    (full CSS reset + base typography + all shared utility classes)
   Backend (only if plan requires it):
     - backend/package.json  (express + cors)
     - backend/server.js     (Express skeleton with CORS, listening on 0.0.0.0:5000)
@@ -102,8 +115,14 @@ Follow these guidelines:
 
 EXECUTION ORDER (MANDATORY):
     Step 1 is ALWAYS the project scaffold task. You MUST complete it fully before any other step:
-      - Write package.json, next.config.js, pages/_document.js, pages/_app.js, pages/index.js
-        (and backend/package.json + backend/server.js if a backend is needed).
+      - Write package.json, next.config.js, pages/_document.js, pages/_app.js, pages/index.js,
+        AND styles/globals.css (and backend/package.json + backend/server.js if a backend is needed).
+      - styles/globals.css MUST be created with a full CSS reset and base styles (see STYLING RULES).
+      - pages/_app.js MUST import globals.css:
+            import '../styles/globals.css';
+            export default function App({{ Component, pageProps }}) {{
+              return <Component {{...pageProps}} />;
+            }}
       - pages/index.js MUST export a default React component using INLINE syntax:
             export default function Home() {{ return <div>Loading…</div>; }}
         NEVER write `export default Home;` at the bottom unless `Home` is defined above it.
@@ -117,27 +136,429 @@ EXECUTION ORDER (MANDATORY):
     add it to package.json AND run `npm install` before using it.
     NEVER use `prop-types` — skip all PropTypes validation. Plain JS functions with no type checking.
 
-STYLING RULES (MANDATORY — NO EXCEPTIONS):
-    - ALWAYS use inline CSS styles via the `style` attribute or `style` prop.
-      Example JSX:  style={{{{ color: 'red', fontSize: '16px' }}}}
-      Example HTML: style="color: red; font-size: 16px;"
-    - NEVER import any CSS file anywhere. This means:
-        * NO  import '../styles/globals.css'
-        * NO  import './styles.css'
-        * NO  import 'anything.css'
-        * NO  import 'anything.scss' / '.sass' / '.less'
-      Importing a CSS file that does not exist WILL crash the build.
-    - NEVER create a styles/ directory or any .css / .scss / .sass / .less file.
-    - NEVER use className or class attributes that rely on external stylesheets,
-      Tailwind, Bootstrap, or any CSS framework.
-    - ALL visual styling MUST be applied exclusively through inline styles.
-    - Build full-page layouts with inline flexbox or grid directly on elements.
-    - pages/_app.js MUST be EXACTLY this — copy verbatim, add nothing else:
+PAGES ROUTER — IMPORT PATHS (CRITICAL — VIOLATIONS CAUSE 404):
+    This project uses the Next.js Pages Router. There is NO src/ directory and NO app/ directory.
+    ALL components live in components/ at the project root. ALL pages live in pages/.
+
+    CORRECT import in pages/index.js:
+        import Hero     from '../components/Hero';
+        import Navbar   from '../components/Navbar';
+        import Footer   from '../components/Footer';
+
+    WRONG — these paths will ALWAYS cause a 404 or "Module not found" error:
+        import Hero from '../src/app/page';        ← WRONG: src/ does not exist
+        import Hero from '../app/page';            ← WRONG: app/ does not exist
+        import Hero from '../src/components/Hero'; ← WRONG: src/ does not exist
+        import Hero from './app/page';             ← WRONG: app/ does not exist
+
+    If you need a component that doesn't exist yet, CREATE it in components/:
+        components/Hero.js
+        components/Navbar.js
+        components/Footer.js
+    NEVER reference app/, src/app/, or any App Router path from a Pages Router file.
+
+STYLING RULES — USE GLOBAL CSS FOR BEAUTIFUL, PRODUCTION-QUALITY UI:
+    - ALWAYS create a styles/globals.css file in the project root with rich, professional styles.
+    - ALWAYS import it in pages/_app.js like this:
+        import '../styles/globals.css';
         export default function App({{ Component, pageProps }}) {{
           return <Component {{...pageProps}} />;
         }}
-      NEVER add `import '../styles/globals.css'` or any CSS import to _app.js.
-      There are no CSS files in this project. Any CSS import WILL crash the build.
+
+    ⚠️  CRITICAL CSS IMPORT RULE — VIOLATIONS CAUSE BUILD FAILURE:
+        `import '../styles/globals.css'` (or ANY .css file) MUST ONLY appear in pages/_app.js.
+        NEVER import a .css file inside:
+          - pages/index.js   ← BUILD ERROR: "Global CSS cannot be imported from files other than your Custom <App>"
+          - pages/about.js   ← same error
+          - components/Navbar.js  ← same error
+          - ANY file other than pages/_app.js
+
+        For component-specific styles, use CSS Modules:
+          - Create: styles/Navbar.module.css
+          - Import:  import styles from '../styles/Navbar.module.css'  (this IS allowed anywhere)
+        Or just put all styles in globals.css using regular class selectors.
+
+    - Use className attributes on elements and define the styles in globals.css.
+    - NEVER use Tailwind, Bootstrap, or any external CSS framework package.
+      Write all CSS yourself in the CSS files you create.
+
+    ── GOOGLE FONTS (MANDATORY) ──────────────────────────────────────────────────
+    ALWAYS load a Google Font in pages/_document.js inside the <Head> tag.
+    Choose a font that fits the app's personality:
+      * Modern SaaS/Tech: Inter or Plus Jakarta Sans
+      * Creative/Agency: Syne or Space Grotesk
+      * Elegant/Luxury: DM Serif Display (headings) + DM Sans (body)
+      * Playful/Startup: Nunito or Poppins
+      * Technical/Dev tool: JetBrains Mono (code) + Inter (body)
+    Example (add inside the <Head> in pages/_document.js):
+      <link rel="preconnect" href="https://fonts.googleapis.com" />
+      <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
+      <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet" />
+    Then reference it in globals.css: body {{ font-family: 'Inter', system-ui, sans-serif; }}
+
+    ── CSS CUSTOM PROPERTIES (MANDATORY) ────────────────────────────────────────
+    ALWAYS define a :root block with design tokens. Choose values that match the app theme:
+      :root {{
+        /* Colors — adjust hues to match the app domain */
+        --primary:       #6366f1;   /* main brand color */
+        --primary-dark:  #4f46e5;   /* darker variant for hover */
+        --primary-light: rgba(99,102,241,0.12);  /* subtle tint for backgrounds */
+        --secondary:     #a78bfa;   /* gradient endpoint / accent */
+        --accent:        #60a5fa;   /* highlight / link color */
+
+        /* Backgrounds */
+        --bg:         #07070a;   /* page background */
+        --surface:    #111118;   /* card / panel background */
+        --surface-2:  #1a1a26;   /* raised surface (modals, popovers) */
+        --border:     rgba(255,255,255,0.07);  /* subtle borders */
+        --border-hover: rgba(99,102,241,0.4);  /* border on hover */
+
+        /* Typography */
+        --text:        #f1f5f9;   /* body text */
+        --text-muted:  #94a3b8;   /* secondary text */
+        --text-subtle: #475569;   /* placeholder / disabled */
+
+        /* Spacing & Shape */
+        --radius-sm:  8px;
+        --radius:     12px;
+        --radius-lg:  20px;
+        --radius-xl:  32px;
+
+        /* Shadows & Effects */
+        --shadow-sm:   0 2px 12px rgba(0,0,0,0.3);
+        --shadow:      0 4px 30px rgba(0,0,0,0.5);
+        --shadow-lg:   0 8px 60px rgba(0,0,0,0.6);
+        --glow:        0 0 30px rgba(99,102,241,0.35);
+        --glow-lg:     0 0 60px rgba(99,102,241,0.5);
+
+        /* Transitions */
+        --transition:      all 0.25s cubic-bezier(0.4,0,0.2,1);
+        --transition-slow: all 0.4s cubic-bezier(0.4,0,0.2,1);
+      }}
+
+    ── ANIMATIONS (MANDATORY) ───────────────────────────────────────────────────
+    ALWAYS include these keyframes in globals.css and apply them to appropriate elements:
+      @keyframes fadeInUp {{
+        from {{ opacity: 0; transform: translateY(28px); }}
+        to   {{ opacity: 1; transform: translateY(0); }}
+      }}
+      @keyframes fadeInLeft {{
+        from {{ opacity: 0; transform: translateX(-28px); }}
+        to   {{ opacity: 1; transform: translateX(0); }}
+      }}
+      @keyframes float {{
+        0%,100% {{ transform: translateY(0px); }}
+        50%      {{ transform: translateY(-14px); }}
+      }}
+      @keyframes pulse-glow {{
+        0%,100% {{ box-shadow: var(--glow); }}
+        50%      {{ box-shadow: var(--glow-lg); }}
+      }}
+      @keyframes shimmer {{
+        0%   {{ background-position: -200% center; }}
+        100% {{ background-position:  200% center; }}
+      }}
+      @keyframes spin {{
+        to {{ transform: rotate(360deg); }}
+      }}
+    Apply animations with staggered delays on repeated children:
+      .hero-content {{ animation: fadeInUp 0.7s ease-out both; }}
+      .feature-card:nth-child(1) {{ animation: fadeInUp 0.6s 0.1s ease-out both; }}
+      .feature-card:nth-child(2) {{ animation: fadeInUp 0.6s 0.2s ease-out both; }}
+      .feature-card:nth-child(3) {{ animation: fadeInUp 0.6s 0.3s ease-out both; }}
+
+    ── COMPONENT PATTERNS (IMPLEMENT ALL THAT APPLY) ────────────────────────────
+
+    NAVBAR:
+      .navbar {{
+        position: sticky; top: 0; z-index: 100;
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 0 2rem; height: 68px;
+        background: rgba(7,7,10,0.85);
+        backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+        border-bottom: 1px solid var(--border);
+        transition: var(--transition);
+      }}
+      .navbar-logo {{
+        font-size: 1.25rem; font-weight: 800; letter-spacing: -0.03em;
+        background: linear-gradient(135deg, var(--secondary), var(--accent));
+        -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+      }}
+      .navbar-link {{
+        color: var(--text-muted); text-decoration: none; font-size: 0.9rem;
+        font-weight: 500; transition: var(--transition);
+        padding: 0.4rem 0.75rem; border-radius: var(--radius-sm);
+      }}
+      .navbar-link:hover {{ color: var(--text); background: rgba(255,255,255,0.05); }}
+
+    HERO SECTION:
+      .hero {{
+        min-height: 100vh;
+        display: flex; align-items: center; justify-content: center;
+        text-align: center; padding: 6rem 2rem;
+        position: relative; overflow: hidden;
+        background:
+          radial-gradient(ellipse 80% 60% at 50% -10%, rgba(99,102,241,0.18) 0%, transparent 70%),
+          radial-gradient(ellipse 60% 40% at 80% 80%, rgba(167,139,250,0.1) 0%, transparent 60%),
+          var(--bg);
+      }}
+      /* Decorative glow orbs */
+      .hero::before {{
+        content: ''; position: absolute; width: 600px; height: 600px;
+        border-radius: 50%; top: -200px; left: 50%; transform: translateX(-50%);
+        background: radial-gradient(circle, rgba(99,102,241,0.12) 0%, transparent 70%);
+        pointer-events: none;
+      }}
+      .hero-eyebrow {{
+        display: inline-flex; align-items: center; gap: 0.5rem;
+        padding: 0.35rem 1rem; border-radius: 99px;
+        background: rgba(99,102,241,0.1); border: 1px solid rgba(99,102,241,0.25);
+        color: var(--secondary); font-size: 0.82rem; font-weight: 600;
+        letter-spacing: 0.04em; text-transform: uppercase;
+        margin-bottom: 1.5rem;
+      }}
+      .hero-title {{
+        font-size: clamp(2.8rem, 7vw, 5.5rem);
+        font-weight: 900; line-height: 1.05; letter-spacing: -0.04em;
+        color: var(--text); margin-bottom: 1.25rem;
+      }}
+      .gradient-text {{
+        background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 50%, var(--accent) 100%);
+        -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+        background-clip: text;
+      }}
+      .hero-subtitle {{
+        font-size: clamp(1rem, 2vw, 1.25rem); color: var(--text-muted);
+        max-width: 600px; margin: 0 auto 2.5rem; line-height: 1.7;
+      }}
+      .hero-actions {{
+        display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap;
+      }}
+
+    BUTTONS:
+      .btn {{
+        display: inline-flex; align-items: center; justify-content: center;
+        gap: 0.5rem; padding: 0.75rem 1.75rem;
+        border-radius: var(--radius-sm); font-weight: 600; font-size: 0.95rem;
+        cursor: pointer; border: none; text-decoration: none;
+        transition: var(--transition); letter-spacing: 0.01em;
+      }}
+      .btn-primary {{
+        background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+        color: #fff; box-shadow: var(--glow);
+      }}
+      .btn-primary:hover {{
+        transform: translateY(-2px);
+        box-shadow: var(--glow-lg);
+        filter: brightness(1.1);
+      }}
+      .btn-primary:active {{ transform: translateY(0); }}
+      .btn-ghost {{
+        background: transparent;
+        border: 1px solid var(--border);
+        color: var(--text-muted);
+      }}
+      .btn-ghost:hover {{
+        border-color: var(--primary); color: var(--primary);
+        background: var(--primary-light);
+      }}
+      .btn-lg {{ padding: 1rem 2.25rem; font-size: 1.05rem; border-radius: var(--radius); }}
+
+    CARDS:
+      .card {{
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-lg);
+        padding: 1.75rem;
+        transition: var(--transition);
+        position: relative; overflow: hidden;
+      }}
+      .card:hover {{
+        transform: translateY(-4px);
+        border-color: var(--border-hover);
+        box-shadow: var(--shadow-lg), 0 0 40px rgba(99,102,241,0.08);
+      }}
+      /* Subtle top gradient line on hover */
+      .card::before {{
+        content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px;
+        background: linear-gradient(90deg, transparent, var(--primary), transparent);
+        opacity: 0; transition: var(--transition);
+      }}
+      .card:hover::before {{ opacity: 1; }}
+      .card-icon {{
+        display: inline-flex; padding: 0.85rem; border-radius: var(--radius-sm);
+        background: var(--primary-light); color: var(--primary);
+        font-size: 1.4rem; margin-bottom: 1.25rem;
+      }}
+      .card-title {{
+        font-size: 1.1rem; font-weight: 700; color: var(--text);
+        margin-bottom: 0.6rem; letter-spacing: -0.02em;
+      }}
+      .card-text {{
+        color: var(--text-muted); font-size: 0.9rem; line-height: 1.7;
+      }}
+
+    SECTION LAYOUT:
+      .section {{
+        padding: 6rem 2rem; max-width: 1200px; margin: 0 auto;
+      }}
+      .section-header {{
+        text-align: center; margin-bottom: 4rem;
+      }}
+      .section-tag {{
+        display: inline-block; padding: 0.3rem 0.9rem; border-radius: 99px;
+        background: var(--primary-light); color: var(--primary);
+        font-size: 0.78rem; font-weight: 700; letter-spacing: 0.06em;
+        text-transform: uppercase; margin-bottom: 1rem;
+      }}
+      .section-title {{
+        font-size: clamp(1.8rem, 4vw, 3rem);
+        font-weight: 800; letter-spacing: -0.03em;
+        color: var(--text); line-height: 1.1; margin-bottom: 1rem;
+      }}
+      .section-subtitle {{
+        font-size: 1.05rem; color: var(--text-muted);
+        max-width: 560px; margin: 0 auto; line-height: 1.7;
+      }}
+      .grid-3 {{
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        gap: 1.5rem;
+      }}
+      .grid-2 {{
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+        gap: 2rem; align-items: center;
+      }}
+
+    FOOTER:
+      .footer {{
+        background: var(--surface); border-top: 1px solid var(--border);
+        padding: 4rem 2rem 2rem; margin-top: 4rem;
+      }}
+      .footer-inner {{
+        max-width: 1200px; margin: 0 auto;
+        display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 3rem;
+      }}
+      .footer-brand {{ font-size: 1.1rem; font-weight: 800; margin-bottom: 0.75rem; }}
+      .footer-tagline {{ color: var(--text-muted); font-size: 0.9rem; line-height: 1.6; }}
+      .footer-heading {{ font-weight: 700; font-size: 0.8rem; letter-spacing: 0.06em;
+        text-transform: uppercase; color: var(--text-subtle); margin-bottom: 1rem; }}
+      .footer-link {{ display: block; color: var(--text-muted); text-decoration: none;
+        font-size: 0.9rem; padding: 0.25rem 0; transition: var(--transition); }}
+      .footer-link:hover {{ color: var(--text); }}
+      .footer-bottom {{
+        max-width: 1200px; margin: 3rem auto 0;
+        border-top: 1px solid var(--border); padding-top: 1.5rem;
+        display: flex; justify-content: space-between; align-items: center;
+        color: var(--text-subtle); font-size: 0.83rem;
+      }}
+
+    FEATURE/STATS STRIP:
+      .stats-strip {{
+        display: flex; justify-content: center; flex-wrap: wrap; gap: 3rem;
+        padding: 3rem 2rem;
+        border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+        background: var(--surface);
+      }}
+      .stat {{ text-align: center; }}
+      .stat-value {{
+        font-size: 2.5rem; font-weight: 900; letter-spacing: -0.04em;
+        background: linear-gradient(135deg, var(--primary), var(--secondary));
+        -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+      }}
+      .stat-label {{ color: var(--text-muted); font-size: 0.85rem; margin-top: 0.25rem; }}
+
+    TESTIMONIAL CARDS:
+      .testimonial {{
+        background: var(--surface); border: 1px solid var(--border);
+        border-radius: var(--radius-lg); padding: 1.75rem;
+      }}
+      .testimonial-quote {{
+        color: var(--text-muted); font-size: 0.95rem; line-height: 1.7;
+        margin-bottom: 1.25rem; font-style: italic;
+      }}
+      .testimonial-author {{ display: flex; align-items: center; gap: 0.75rem; }}
+      .testimonial-avatar {{
+        width: 40px; height: 40px; border-radius: 50%;
+        background: linear-gradient(135deg, var(--primary), var(--secondary));
+        display: flex; align-items: center; justify-content: center;
+        font-weight: 700; font-size: 0.9rem; color: #fff;
+      }}
+      .testimonial-name {{ font-weight: 600; font-size: 0.9rem; color: var(--text); }}
+      .testimonial-role {{ font-size: 0.78rem; color: var(--text-subtle); }}
+
+    INPUT / FORM ELEMENTS:
+      .input {{
+        width: 100%; padding: 0.75rem 1rem; border-radius: var(--radius-sm);
+        border: 1px solid var(--border); background: var(--surface-2);
+        color: var(--text); font-size: 0.9rem; font-family: inherit;
+        outline: none; transition: var(--transition);
+      }}
+      .input:focus {{
+        border-color: rgba(99,102,241,0.5);
+        box-shadow: 0 0 0 3px rgba(99,102,241,0.12);
+      }}
+      .input::placeholder {{ color: var(--text-subtle); }}
+      .label {{
+        display: block; font-size: 0.82rem; font-weight: 600;
+        color: var(--text-muted); margin-bottom: 0.4rem;
+        letter-spacing: 0.02em;
+      }}
+
+    BADGE / PILL:
+      .badge {{
+        display: inline-flex; align-items: center; gap: 0.35rem;
+        padding: 0.25rem 0.75rem; border-radius: 99px;
+        font-size: 0.72rem; font-weight: 600;
+        background: var(--primary-light); color: var(--primary);
+        border: 1px solid rgba(99,102,241,0.25);
+      }}
+
+    DIVIDER GLOW:
+      .divider {{
+        height: 1px; width: 100%;
+        background: linear-gradient(90deg, transparent, var(--border), transparent);
+        margin: 2rem 0;
+      }}
+
+    ── RESPONSIVENESS (MANDATORY) ───────────────────────────────────────────────
+    ALWAYS include these breakpoints:
+      @media (max-width: 1024px) {{
+        .footer-inner {{ grid-template-columns: 1fr 1fr; }}
+      }}
+      @media (max-width: 768px) {{
+        .section {{ padding: 4rem 1.25rem; }}
+        .hero {{ padding: 5rem 1.25rem; min-height: 90vh; }}
+        .hero-title {{ font-size: clamp(2rem, 10vw, 3rem); }}
+        .hero-actions {{ flex-direction: column; align-items: center; }}
+        .navbar {{ padding: 0 1.25rem; }}
+        .footer-inner {{ grid-template-columns: 1fr; gap: 2rem; }}
+        .footer-bottom {{ flex-direction: column; gap: 0.75rem; text-align: center; }}
+        .stats-strip {{ gap: 2rem; }}
+        .grid-3, .grid-2 {{ grid-template-columns: 1fr; }}
+      }}
+
+    ── SCROLLBAR ────────────────────────────────────────────────────────────────
+    ALWAYS style the scrollbar:
+      html {{ scroll-behavior: smooth; }}
+      ::-webkit-scrollbar {{ width: 6px; }}
+      ::-webkit-scrollbar-track {{ background: var(--bg); }}
+      ::-webkit-scrollbar-thumb {{ background: rgba(255,255,255,0.1); border-radius: 99px; }}
+      ::-webkit-scrollbar-thumb:hover {{ background: rgba(255,255,255,0.2); }}
+
+    ── DESIGN QUALITY CHECKLIST ─────────────────────────────────────────────────
+    Before finalising code, verify ALL of the following:
+      ✓ Google Font loaded in _document.js
+      ✓ CSS :root variables defined
+      ✓ All keyframe animations defined and applied
+      ✓ Navbar is sticky with backdrop blur
+      ✓ Hero has radial gradient background + large gradient heading
+      ✓ All buttons have hover lift + glow shadow
+      ✓ All cards have hover lift + border highlight
+      ✓ Mobile breakpoints covered (max-width: 768px)
+      ✓ Scrollbar styled
+      ✓ No Tailwind/Bootstrap imports
 
 NEXT.JS FRONTEND (MANDATORY for every project):
     - ALWAYS use Next.js for the frontend. NEVER use plain React + Vite or CRA.
@@ -240,7 +661,8 @@ DON'T:
     - Don't write partial code for a file.
     - Don't move to the next task until the current task is fully implemented and integrated.
     - Don't use Vite, CRA, or any bundler other than Next.js for the frontend.
-    - Don't use external CSS files, CSS classes, or CSS frameworks. Inline styles only.
+    - Don't use Tailwind, Bootstrap, or any third-party CSS framework.
+    - Don't import .css files anywhere except: globals.css in pages/_app.js, and CSS Modules in the component that owns them.
     - Don't add a backend unless the plan requires it.
     """
     return system_prompt
@@ -266,18 +688,45 @@ CRITICAL — NEVER DO THIS:
 
 KNOWN ERROR PATTERNS — check these first:
 
-0z. Import pointing to wrong path (e.g. `import X from '../app/page.js'` or `'../../app/...'`)
-   → Root cause: The agent accidentally used App Router paths (app/) instead of components/.
+0g. "Global CSS cannot be imported from files other than your Custom <App>"
+   → Symptom: Next.js build error, location shows pages/index.js (or any file other than _app.js).
+   → Root cause: A .css file (e.g. globals.css) is imported in a page or component file.
+     Next.js only allows global CSS imports inside pages/_app.js.
    → Fix:
-       a. Read pages/index.js (or whichever page has the bad import).
-       b. Find any import that references `app/` directory or `page.js` — these are WRONG
-          in a Pages Router project.
-       c. Determine the component name (e.g. Calculator). Check if it exists under
-          components/Calculator.js. If not, create a stub there:
-              export default function Calculator() {{ return <div>Calculator</div>; }}
-       d. Fix the import to point to the correct path:
-              import Calculator from '../components/Calculator';
-       e. Wait 10 s for Next.js hot-reload, then verify with curl.
+       a. Find every file that imports a global CSS file (NOT a CSS Module):
+              run_cmd("grep -rn \"import.*\\.css'\" pages/ components/")
+       b. For each bad import found (e.g. `import '../styles/globals.css'` in pages/index.js):
+            - DELETE that import line from the file.
+            - Verify pages/_app.js already has `import '../styles/globals.css';` — if not, add it.
+       c. If component-level CSS is needed, rename the CSS file to a CSS Module:
+            - Rename styles/Foo.css → styles/Foo.module.css
+            - Change the import to: `import styles from '../styles/Foo.module.css'`
+       d. Rewrite the affected file(s) without the bad CSS imports.
+       e. Wait 10 s then curl: run_cmd("sleep 10 && curl -s -o /dev/null -w '%{{http_code}}' http://localhost:3000/")
+   → NEVER import a plain .css file outside of pages/_app.js.
+
+0z. Import pointing to wrong path — src/app/, app/, src/components/, or any App Router path
+   → Symptoms: "Module not found: Can't resolve '../src/app/page'" or similar, or 404 on root URL.
+   → Root cause: The coder used App Router paths (app/ or src/app/) inside a Pages Router project.
+     There is NO src/ directory and NO app/ directory in this project.
+   → Fix (do ALL steps, do not stop early):
+       a. Read pages/index.js to find every bad import:
+              run_cmd("cat pages/index.js")
+       b. For EACH import referencing app/, src/app/, src/components/, or src/:
+            - Extract the component name (e.g. `Hero` from `import Hero from '../src/app/page'`)
+            - Check if components/<ComponentName>.js already exists:
+                  run_cmd("cat components/Hero.js")
+            - If the file is MISSING or contains wrong content, REWRITE it at components/<ComponentName>.js
+              with a real implementation (not just a stub — write the actual component the page needs).
+            - Fix the import in pages/index.js to:
+                  import Hero from '../components/Hero';
+       c. Fix ALL bad imports in one go — rewrite pages/index.js completely with correct paths.
+       d. Verify no bad paths remain:
+              run_cmd("grep -n 'src/app\\|app/page\\|src/components' pages/index.js")
+          If grep returns any lines, fix them.
+       e. Wait 15 s for Next.js to recompile, then curl:
+              run_cmd("sleep 15 && curl -s -o /dev/null -w '%{{http_code}}' http://localhost:3000/")
+          200 → resolved. Still 404 → check other page files for the same bad imports.
 
 0. "ReferenceError: X is not defined" where X is a React component or function name
    → Root cause: The file has `export default Home` (or JSX like `<Home />`) but
@@ -310,14 +759,13 @@ KNOWN ERROR PATTERNS — check these first:
      pages/_document.js, or an IMPORTED COMPONENT) is preventing Next.js from building
      ANY page. Next.js returns 404 for all routes when any imported file fails to compile.
    → Fix (check in this order):
-       a. Read pages/_app.js. If it contains ANY CSS/SCSS import like:
-              import '../styles/globals.css'
-              import './anything.css'
-          DELETE that import line. The ONLY correct content for pages/_app.js is:
+       a. Read pages/_app.js. It MUST have this exact structure (CSS import is correct):
+              import '../styles/globals.css';
               export default function App({{ Component, pageProps }}) {{
                 return <Component {{...pageProps}} />;
               }}
-          Rewrite the entire file to exactly that, nothing else.
+          If styles/globals.css does not exist yet, CREATE it with a basic CSS reset
+          (do NOT remove the import — create the missing file instead).
        b. Read pages/_document.js. Check it imports from 'next/document' (not 'next/head').
           Fix any syntax errors found.
        c. List the pages/ directory and check if any other file has a syntax error.
@@ -327,7 +775,7 @@ KNOWN ERROR PATTERNS — check these first:
             - If the file is MISSING, create a minimal stub:
                   export default function Calculator() {{ return <div>Loading…</div>; }}
             - If it EXISTS, check for: syntax errors, `export default X` where X is not
-              defined, any CSS file imports, packages not listed in package.json.
+              defined, packages not listed in package.json.
             - Fix every problem found before moving on.
           Repeat for ALL imported components — not just the first one.
        e. After each fix, wait 10 s for Next.js hot-reload:
@@ -336,13 +784,13 @@ KNOWN ERROR PATTERNS — check these first:
           fixed. If still 404, check dev-server stdout for webpack/compilation errors.
    → DO NOT give up after one fix attempt — work through EVERY imported file systematically.
 
-0b. "Module not found: Can't resolve '...globals.css'" or any CSS/SCSS import error
-   → Root cause: A file (usually pages/_app.js) has `import '../styles/globals.css'`
-     or similar. The project uses inline styles only — no CSS files exist.
-   → Fix: Open the offending file, DELETE the CSS import line entirely.
-          Then check if a styles/ directory was created and delete it too.
-          Apply any global styles as inline style props on a wrapper element instead.
-          Do NOT create the missing CSS file — remove the import.
+0b. "Module not found: Can't resolve '...globals.css'" or any CSS file import error
+   → Root cause: pages/_app.js imports styles/globals.css but the file does not exist yet.
+   → Fix: CREATE the missing CSS file with a full CSS reset and base styles.
+          Do NOT remove the import — the CSS file is intentional and required.
+          Example minimal styles/globals.css:
+            *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+            body {{ font-family: 'Segoe UI', system-ui, sans-serif; line-height: 1.6; color: #333; }}
 
 1. "Cannot find module 'next'" or any Next.js module missing
    → Fix: Ensure package.json has "next", "react", "react-dom" in dependencies.

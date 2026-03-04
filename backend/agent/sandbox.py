@@ -203,7 +203,44 @@ class SandboxManager:
         except Exception as e:
             return f"[ErrorTracker] Failed: {e}"
 
-    # ── LangChain tool factory ───────────────────────────────────────────────────
+    # ── Download ────────────────────────────────────────────────────────────────
+
+    def download_project_zip(self) -> bytes:
+        """
+        Zip the project work_dir (excluding node_modules, .next, dist, .git)
+        inside the sandbox and return the raw ZIP bytes.
+        """
+        zip_path = f"/tmp/{self.project_id}.zip"
+
+        # Remove any stale zip from a previous call
+        self.run_cmd(f"rm -f {zip_path}", timeout=10)
+
+        exit_code, _, stderr = self.run_cmd(
+            
+            f"cd {self.work_dir} && zip -r {zip_path} . "
+            "--exclude '*/node_modules/*' "
+            "--exclude 'node_modules/*' "
+            "--exclude '*/.next/*' "
+            "--exclude '.next/*' "
+            "--exclude '*/dist/*' "
+            "--exclude 'dist/*' "
+            "--exclude '*/build/*' "
+             "--exclude 'build/*' "
+            "--exclude '*/.git/*'"
+            "--exclude '.git/*'",
+            timeout=120,
+        )
+        if exit_code != 0:
+            raise RuntimeError(f"zip failed (exit {exit_code}): {stderr}")
+
+        import base64
+        b64_exit, b64_out, b64_err = self.run_cmd(
+            f"base64 -w 0 {zip_path}", timeout=120
+        )
+        if b64_exit != 0:
+            raise RuntimeError(f"base64 encode failed: {b64_err}")
+        return base64.b64decode(b64_out.strip())
+
 
     def get_tools(self, include_process_tools: bool = False, include_kill: bool = True) -> list:
         """
@@ -218,8 +255,8 @@ class SandboxManager:
         """
         from langchain_core.tools import tool
 
-        _sbx = self  # capture self in closure
-
+        _sbx = self  
+        
         _BACKGROUND_PREFIXES = (
             "npm run dev", "npm start", "npm run start",
             "yarn dev", "yarn start", "pnpm dev", "pnpm start",
@@ -346,7 +383,6 @@ def cleanup_sandbox(project_id: str):
         sbx._sbx.kill()  # force-kill the sandbox container
     else:
         print(f"[Sandbox] No sandbox found to clean for project {project_id}")
-# ── Registry ────────────────────────────────────────────────────────────────────
 
 def get_sandbox(project_id: str) -> SandboxManager:
     """Return the SandboxManager for project_id, creating it if needed."""
