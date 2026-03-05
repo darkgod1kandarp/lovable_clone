@@ -6,6 +6,8 @@ A full-stack AI-powered web application that generates complete websites from a 
 
 [![Watch the Demo](https://img.youtube.com/vi/DUYX1sY5vmY/0.jpg)](https://youtu.be/DUYX1sY5vmY)
 
+[![Watch the Demo 2](https://img.youtube.com/vi/Okz4bhhRVtA/0.jpg)](https://youtu.be/Okz4bhhRVtA)
+
 ---
 
 ## Features
