@@ -474,7 +474,7 @@ export default function PromptInput() {
               fontSize: '0.92rem', fontWeight: 700, letterSpacing: '-0.02em',
               background: 'linear-gradient(135deg, #a78bfa, #60a5fa)',
               WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
-            }}>Lovable</span>
+            }}>code-as-you-prompt</span>
           </div>
 
           <form onSubmit={handleSubmit}

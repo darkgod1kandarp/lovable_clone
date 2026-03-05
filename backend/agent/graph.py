@@ -760,6 +760,7 @@ def run_edit_agent(
     use_ollama  : bool = False,
     use_gemini  : bool = False,
     use_qwen    : bool = False,
+    use_claude    : bool = False,
     use_groq    : bool = False,
     on_phase    = None,
 ) -> dict:
@@ -780,9 +781,10 @@ def run_edit_agent(
     elif use_groq:
         llm = ChatGroq(model="openai/gpt-oss-120b", temperature=0.2)
         print("Using Groq (gpt-oss-120b)")
-    else:
-        llm = ChatAnthropic(model="gemini-2.5-pro", temperature=0.2)
-        print("Using default: Gemini (gemini-2.5-pro)")
+    elif use_claude:
+        llm = ChatAnthropic(model="claude-2", temperature=0.2)
+        print("Using Claude (claude-2)")
+  
 
     if on_phase:
         on_phase("editor", {})
